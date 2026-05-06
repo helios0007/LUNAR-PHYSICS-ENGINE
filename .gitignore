@@ -16,3 +16,6 @@ shielding_heatmap.png
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code local settings
+.claude/

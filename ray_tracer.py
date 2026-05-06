@@ -24,28 +24,35 @@ def generate_ray_directions(num_rays=500):
 
 def cast_rays(model_data):
     """
-    Cast rays from each face centroid inward to estimate
-    shielding thickness.
+    Cast rays from each logical wall's centroid inward to estimate
+    shielding thickness per wall surface.
     """
 
-    mesh = model_data["mesh"]
-    centroids = model_data["centroids"]
+    mesh  = model_data["mesh"]
+    walls = model_data["walls"]   # list of wall dicts from group_faces_by_normal
 
-    directions = generate_ray_directions(500)
+    all_directions = generate_ray_directions(500)
 
     results = []
 
-    print("Starting ray casting...")
+    print(f"Starting ray casting over {len(walls)} walls...")
 
-    for i, centroid in enumerate(centroids):
+    for i, wall in enumerate(walls):
+        wall_normal = wall["normal"]
+        centroid    = wall["centroid"]
 
-        total_thickness = 0
+        # Keep only directions in the outward hemisphere of this wall so that
+        # -direction always shoots inward through the structure.
+        dots       = all_directions @ wall_normal
+        inward_dirs = all_directions[dots > 0]
 
-        for direction in directions:
+        total_thickness = 0.0
+        valid_count     = 0
 
-            # Start ray slightly outside face
+        for direction in inward_dirs:
+
             ray_origin = centroid + direction * 0.001
-            ray_dir = -direction
+            ray_dir    = -direction
 
             locations, _, _ = mesh.ray.intersects_location(
                 ray_origins=[ray_origin],
@@ -55,17 +62,21 @@ def cast_rays(model_data):
             if len(locations) >= 2:
                 thickness = np.linalg.norm(locations[1] - locations[0])
                 total_thickness += thickness
+                valid_count += 1
 
-        avg_thickness = total_thickness / len(directions)
+        avg_thickness = total_thickness / valid_count if valid_count > 0 else 0.0
 
         results.append({
-            "face_index": i,
-            "centroid": centroid,
+            "wall_index":      i,
+            "face_indices":    wall["face_indices"],   # all triangles that belong here
+            "centroid":        centroid,
+            "normal":          wall_normal,
+            "area":            wall["area"],
             "avg_shielding_m": round(avg_thickness, 4)
         })
 
-        if i % 100 == 0:
-            print(f"Processed face {i} / {len(centroids)}")
+        print(f"  Wall {i + 1}/{len(walls)}  shielding={avg_thickness:.4f} m  "
+              f"faces={len(wall['face_indices'])}  area={wall['area']:.3f} m²")
 
     print("Ray casting completed.")
 
@@ -75,37 +86,36 @@ def cast_rays(model_data):
 def visualize_results(model_data, results):
     """
     Create a 3D heatmap visualization of shielding thickness.
+    Every triangle that belongs to the same wall is painted the same colour
+    so the model reads as discrete architectural surfaces, not a noisy triangle soup.
     """
 
     mesh = model_data["mesh"]
 
-    scores = {r["face_index"]: r["avg_shielding_m"] for r in results}
+    # Build a per-triangle shielding lookup keyed by face index.
+    # Every triangle in a wall inherits the wall's avg_shielding_m value.
+    face_shielding = np.zeros(len(mesh.faces))
+    for r in results:
+        for fi in r["face_indices"]:
+            face_shielding[fi] = r["avg_shielding_m"]
 
-    values = [scores[i] for i in range(len(mesh.faces))]
-
-    min_v = min(values)
-    max_v = max(values)
-
-    norm = [(v - min_v) / (max_v - min_v + 1e-9) for v in values]
-
-    polys = []
-    colors = []
+    min_v = face_shielding.min()
+    max_v = face_shielding.max()
+    norm  = (face_shielding - min_v) / (max_v - min_v + 1e-9)
 
     colormap = cm.RdYlGn
 
+    polys  = []
+    colors = []
+
     for i, face in enumerate(mesh.faces):
-
-        verts = mesh.vertices[face]
-
-        polys.append(verts)
-
+        polys.append(mesh.vertices[face])
         colors.append(colormap(norm[i]))
 
     fig = plt.figure(figsize=(10, 7))
-    ax = fig.add_subplot(111, projection='3d')
+    ax  = fig.add_subplot(111, projection='3d')
 
     collection = Poly3DCollection(polys, zsort='average')
-
     collection.set_facecolor(colors)
     collection.set_edgecolor('grey')
     collection.set_linewidth(0.2)
@@ -113,28 +123,19 @@ def visualize_results(model_data, results):
     ax.add_collection3d(collection)
 
     scale = mesh.vertices.flatten()
-
     ax.auto_scale_xyz(scale, scale, scale)
 
-    ax.set_title("Shielding Heatmap (Red = Thin, Green = Thick)")
+    ax.set_title("Shielding Heatmap — per wall surface (Red = Thin, Green = Thick)")
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
     ax.set_zlabel("Z (m)")
 
     sm = cm.ScalarMappable(cmap=colormap)
-    sm.set_array(values)
-
-    plt.colorbar(
-        sm,
-        ax=ax,
-        label="Average Shielding Thickness (m)",
-        shrink=0.5
-    )
+    sm.set_array(face_shielding)
+    plt.colorbar(sm, ax=ax, label="Average Shielding Thickness (m)", shrink=0.5)
 
     plt.tight_layout()
-
     plt.savefig("shielding_heatmap.png", dpi=150)
-
     plt.show()
 
     print("Saved visualization: shielding_heatmap.png")
